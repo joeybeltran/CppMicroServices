@@ -31,6 +31,7 @@
 #include "Properties.h"
 
 #include <atomic>
+#include <thread>
 
 namespace cppmicroservices {
 
@@ -58,6 +59,13 @@ protected:
    * Reference count for implicitly shared private implementation.
    */
   std::atomic<int> ref;
+
+  /**
+   * Detect recursive service factory calls. Is set to the thread
+   * executing service factory code, otherwise contains a value
+   * not representing any thread.
+   */
+ std::thread::id factoryThread;
 
   /**
    * Service or ServiceFactory object.

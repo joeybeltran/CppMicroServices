@@ -123,13 +123,18 @@ InterfaceMapConstPtr ServiceReferenceBasePrivate::GetServiceInterfaceMap(BundleP
   if (!registration->available) return s;
   std::shared_ptr<ServiceFactory> serviceFactory;
 
+  FrameworkEvent fwEvent;
+  std::thread::id threadId = std::this_thread::get_id();
+
+  bool firstCall = true;
+
   {
     auto l = registration->Lock(); US_UNUSED(l);
     if (!registration->available) return s;
     serviceFactory = std::static_pointer_cast<ServiceFactory>(
           registration->GetService_unlocked("org.cppmicroservices.factory"));
 
-    registration->dependents.insert(std::make_pair(bundle, 0));
+    firstCall = registration->dependents.insert(std::make_pair(bundle, 0)).second;
 
     if (!serviceFactory)
     {
@@ -147,23 +152,47 @@ InterfaceMapConstPtr ServiceReferenceBasePrivate::GetServiceInterfaceMap(BundleP
       ++registration->dependents.at(bundle);
       return s;
     }
+
+    if (firstCall)
+    {
+      std::swap(registration->factoryThread, threadId);
+    }
+    else if (registration->factoryThread == std::this_thread::get_id())
+    {
+      std::string msg = "Recursive call to ServiceFactory::GetService";
+      fwEvent = FrameworkEvent(FrameworkEvent::Type::FRAMEWORK_ERROR,
+                               MakeBundle(bundle->shared_from_this()),
+                               msg,
+                               std::make_exception_ptr(ServiceException(msg, ServiceException::FACTORY_RECURSION)));
+    }
+  }
+
+  if (fwEvent)
+  {
+    registration->bundle->coreCtx->listeners.SendFrameworkEvent(fwEvent);
+    return nullptr;
   }
 
   // Calling into a service factory could cause re-entrancy into the
   // framework and even, theoretically, into this function. Ensuring
   // we don't hold a lock while calling into the service factory eliminates
   // the possibility of a deadlock. It does not however eliminate the
-  // possbilituy of infinite recursion.
+  // possibility of infinite recursion.
   s = GetServiceFromFactory(bundle, serviceFactory);
 
   auto l = registration->Lock(); US_UNUSED(l);
+
+  if (firstCall)
+  {
+    std::swap(registration->factoryThread, threadId);
+  }
 
   registration->dependents.insert(std::make_pair(bundle, 0));
 
   if (s && !s->empty())
   {
     // Insert a cached service object instance only if one isn't already cached. If another thread
-    // already inserted a cached service object, discard the service object returned by 
+    // already inserted a cached service object, discard the service object returned by
     // GetServiceFromFactory and return the cached one.
     auto insertResultPair = registration->bundleServiceInstance.insert(std::make_pair(bundle, s));
     s = insertResultPair.first->second;
@@ -177,6 +206,10 @@ InterfaceMapConstPtr ServiceReferenceBasePrivate::GetServiceInterfaceMap(BundleP
     {
       s = registration->bundleServiceInstance.at(bundle);
       ++registration->dependents.at(bundle);
+    }
+    else
+    {
+      registration->dependents.erase(bundle);
     }
   }
   return s;
